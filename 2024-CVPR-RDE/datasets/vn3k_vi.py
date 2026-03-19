@@ -1,3 +1,7 @@
+%%writefile /kaggle/working/RDE-mSiglip/2024-CVPR-RDE/datasets/vn3k_vi.py
+
+# Dán toàn bộ nội dung code của file vn3k_vi.py vào đây
+# Sau đó sửa các dòng code theo ý bạn
 
 import os.path as op
 from typing import List
@@ -29,7 +33,7 @@ class VN3KVI(BaseDataset):
     def __init__(self, root='', verbose=True):
         super(VN3KVI, self).__init__()
         self.dataset_dir = op.join(root, self.dataset_dir)
-        self.img_dir = op.join(self.dataset_dir, 'imgs/')
+        self.img_dir = op.join(self.dataset_dir, 'images/')
 
         self.anno_path = op.join(self.dataset_dir, 'vn3k.json')
         self._check_before_run()
