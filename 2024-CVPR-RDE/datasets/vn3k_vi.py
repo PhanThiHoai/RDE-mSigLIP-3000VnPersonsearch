@@ -1,8 +1,3 @@
-%%writefile /kaggle/working/RDE-mSiglip/2024-CVPR-RDE/datasets/vn3k_vi.py
-
-# Dán toàn bộ nội dung code của file vn3k_vi.py vào đây
-# Sau đó sửa các dòng code theo ý bạn
-
 import os.path as op
 from typing import List
 
