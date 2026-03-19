@@ -105,13 +105,56 @@ class BetaMixture1D(object):
         return 'BetaMixture1D(w={}, a={}, b={})'.format(self.weight, self.alphas, self.betas)
 
 
-def split_prob(prob, threshld):
+def split_prob(prob, threshld, noise_rate=0.0, adaptive=True, robust=True):
+    """
+    Robust threshold selection for GMM classification
+    Focus: Robustness to different noise levels and edge cases
+    
+    Args:
+        prob: Probability scores from GMM
+        threshld: Base threshold (default 0.5)
+        noise_rate: Current noise rate for adaptive threshold
+        adaptive: Whether to use adaptive threshold based on noise rate
+        robust: Whether to use robust prediction (handles edge cases)
+    """
+    if adaptive:
+        # Adaptive threshold based on noise rate - ROBUST to different noise levels
+        # At low noise (0.0-0.3): use higher threshold (0.6-0.5) - be more conservative
+        # At high noise (0.4-0.7): use lower threshold (0.4-0.3) - be more aggressive
+        if noise_rate <= 0.3:
+            # Low noise: be conservative, only mark clear noisy samples
+            adaptive_thresh = 0.6 - 0.1 * (noise_rate / 0.3)  # 0.6 to 0.5
+        elif noise_rate <= 0.5:
+            # Medium noise: moderate threshold
+            adaptive_thresh = 0.5 - 0.1 * ((noise_rate - 0.3) / 0.2)  # 0.5 to 0.4
+        else:
+            # High noise: be aggressive, mark more as noisy
+            adaptive_thresh = 0.4 - 0.1 * ((noise_rate - 0.5) / 0.2)  # 0.4 to 0.3
+        
+        threshld = adaptive_thresh
+    
+    # ROBUST: Handle edge case where all probabilities are above threshold
     if prob.min() > threshld:
         """From https://github.com/XLearning-SCU/2021-NeurIPS-NCR"""
         # If prob are all larger than threshld, i.e. no noisy data, we enforce 1/100 unlabeled data
-        print('No estimated noisy data. Enforce the 1/100 data with small probability to be unlabeled.')
+        print(f'No estimated noisy data. Enforce the 1/100 data with small probability to be unlabeled.')
         threshld = np.sort(prob)[len(prob)//100]
-    pred = (prob > threshld)
+    
+    # ROBUST: Handle edge case where all probabilities are below threshold
+    if robust and prob.max() < threshld:
+        # If all are below threshold, use percentile-based threshold
+        threshld = np.percentile(prob, 10)  # Mark bottom 10% as noisy
+    
+    # ROBUST: Use confidence-weighted prediction to handle uncertain cases
+    confidence = np.abs(prob - threshld)
+    pred = (prob > threshld).astype(float)
+    
+    # ROBUST: For uncertain cases (close to threshold), use softer prediction
+    if robust:
+        uncertainty_mask = confidence < 0.1  # Within 0.1 of threshold
+        # For uncertain cases, use probability directly instead of hard threshold
+        pred[uncertainty_mask] = prob[uncertainty_mask]  # Soft prediction for uncertain
+    
     return (pred+0)
 
 def get_loss(model, data_loader):
@@ -159,8 +202,12 @@ def get_loss(model, data_loader):
     prob_B = prob_B[:, gmm_B.means_.argmin()]
  
  
-    pred_A = split_prob(prob_A, 0.5)
-    pred_B = split_prob(prob_B, 0.5)
+    # Get noise rate for adaptive threshold
+    noise_rate = getattr(model.args, 'noisy_rate', 0.0) if hasattr(model, 'args') else 0.0
+    
+    # Use robust adaptive threshold based on noise rate
+    pred_A = split_prob(prob_A, 0.5, noise_rate=noise_rate, adaptive=True, robust=True)
+    pred_B = split_prob(prob_B, 0.5, noise_rate=noise_rate, adaptive=True, robust=True)
   
     return torch.Tensor(pred_A), torch.Tensor(pred_B)
 
@@ -213,6 +260,32 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         label_hat = consensus_division.clone()
         label_hat[consensus_division>1] = 1
         label_hat[consensus_division<=1] = 0 
+
+        # Dump GMM clean/noise classification for each image-text pair
+        if get_rank() == 0:
+            try:
+                dataset_pairs = getattr(train_loader.dataset, "original_dataset", None)
+                real_corr = getattr(train_loader.dataset, "real_correspondences", None)
+                if dataset_pairs is not None:
+                    dump_path = os.path.join(args.output_dir, f"gmm_pairs_epoch_{epoch}.tsv")
+                    with open(dump_path, "w", encoding="utf-8") as f:
+                        f.write("\t".join([
+                            "index", "pid", "image_id", "image_path",
+                            "caption", "gmm_clean", "pred_A", "pred_B", "is_real"
+                        ]) + "\n")
+                        for idx, (pid, image_id, img_path, caption) in enumerate(dataset_pairs):
+                            cap = str(caption).replace("\n", " ").strip()
+                            is_real = ""
+                            if real_corr is not None:
+                                is_real = int(real_corr[idx])
+                            f.write(
+                                f"{idx}\t{pid}\t{image_id}\t{img_path}\t{cap}\t"
+                                f"{int(label_hat[idx].item())}\t{int(pred_A[idx].item())}\t"
+                                f"{int(pred_B[idx].item())}\t{is_real}\n"
+                            )
+                    logger.info(f"GMM pair classification saved to {dump_path}")
+            except Exception as exc:
+                logger.warning(f"Failed to dump GMM pair classifications: {exc}")
         
         model.train() 
         for n_iter, batch in enumerate(train_loader):

@@ -146,6 +146,8 @@ class ImageTextDataset(Dataset):
         self.txt_aug = args.txt_aug
         self.img_aug = args.img_aug
         
+        # Keep a copy of the original (clean) pairs before noise injection
+        self.original_dataset = list(dataset)
         self.dataset, self.real_correspondences = inject_noisy_correspondence(dataset, args.noisy_rate, args.noisy_file)
         
         # Init Tokenizer

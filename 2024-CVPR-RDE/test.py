@@ -1,6 +1,6 @@
 from prettytable import PrettyTable
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+#os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import torch
 import numpy as np
 import time
@@ -18,7 +18,7 @@ from utils.iotools import load_train_configs
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="TranTextReID Text")
-    sub = '/home/qinyang/projects/Text2ImagepPerson/NoiseRID/RDE_release/run_logs/CUHK-PEDES/20240316_232359_RDE_TAL+sr0.3_tau0.015_margin0.1_n0.0'
+    sub = '/mnt/nvme0/home/hoaixg/RDE-mSiglip/2024-CVPR-RDE/run_logs/VN3K-V2E/20260319_150440_mSiglip-RDE_TAL+sr0.3_tau0.015_margin0.3_n0.0'
     parser.add_argument("--config_file", default=f'{sub}/configs.yaml')
     args = parser.parse_args()
     args = load_train_configs(args.config_file)
@@ -28,7 +28,7 @@ if __name__ == '__main__':
     device = "cuda"
     args.output_dir =sub
     test_img_loader, test_txt_loader, num_classes = build_dataloader(args)
-    asss = ['best.pth','last.pth']
+    asss = ['best.pth']
     for i in range(len(asss)):
         if os.path.exists(op.join(args.output_dir, asss[i])):
             model = build_model(args,num_classes)
@@ -36,5 +36,4 @@ if __name__ == '__main__':
             checkpointer.load(f=op.join(args.output_dir, asss[i]))
             model = model.cuda()
             do_inference(model, test_img_loader, test_txt_loader)
-
 
