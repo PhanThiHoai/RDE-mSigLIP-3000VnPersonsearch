@@ -208,8 +208,14 @@ def get_loss(model, data_loader):
     # Use robust adaptive threshold based on noise rate
     pred_A = split_prob(prob_A, 0.5, noise_rate=noise_rate, adaptive=True, robust=True)
     pred_B = split_prob(prob_B, 0.5, noise_rate=noise_rate, adaptive=True, robust=True)
-  
-    return torch.Tensor(pred_A), torch.Tensor(pred_B)
+
+    # Xác suất GMM (thành phần mean thấp ~ "clean") — dump vào TSV để vẽ phân bố [0,1]
+    return (
+        torch.as_tensor(pred_A, dtype=torch.float32),
+        torch.as_tensor(pred_B, dtype=torch.float32),
+        torch.as_tensor(prob_A, dtype=torch.float32),
+        torch.as_tensor(prob_B, dtype=torch.float32),
+    )
 
 
 
@@ -253,10 +259,28 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         # data_size = train_loader.dataset.__len__()
         # pred_A, pred_B  =  torch.ones(data_size), torch.ones(data_size)
     
-        pred_A, pred_B = get_loss(model, train_loader)
+        pred_A, pred_B, prob_A_vec, prob_B_vec = get_loss(model, train_loader)
     
-        consensus_division = pred_A + pred_B # 0,1,2 
-        consensus_division[consensus_division==1] += torch.randint(0, 2, size=(((consensus_division==1)+0).sum(),))
+        pred_A_soft = pred_A.clone()
+        pred_B_soft = pred_B.clone()
+        pred_sum_pre_tie = pred_A_soft + pred_B_soft
+        tie_mask = torch.isclose(
+            pred_sum_pre_tie, torch.ones_like(pred_sum_pre_tie), atol=1e-5, rtol=0.0
+        )
+        n_tie = int(tie_mask.sum().item())
+        tie_random_add = torch.full(
+            pred_sum_pre_tie.shape,
+            -1,
+            dtype=torch.long,
+            device=pred_sum_pre_tie.device,
+        )
+        consensus_division = pred_sum_pre_tie.clone()
+        if n_tie > 0:
+            coins = torch.randint(0, 2, (n_tie,), device=pred_sum_pre_tie.device)
+            tie_random_add[tie_mask] = coins
+            consensus_division[tie_mask] = consensus_division[tie_mask] + coins.to(
+                consensus_division.dtype
+            )
         label_hat = consensus_division.clone()
         label_hat[consensus_division>1] = 1
         label_hat[consensus_division<=1] = 0 
@@ -271,17 +295,33 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                     with open(dump_path, "w", encoding="utf-8") as f:
                         f.write("\t".join([
                             "index", "pid", "image_id", "image_path",
-                            "caption", "gmm_clean", "pred_A", "pred_B", "is_real"
+                            "caption", "gmm_clean", "pred_A", "pred_B",
+                            "prob_A", "prob_B", "pair_score", "is_real",
+                            "pred_A_soft", "pred_B_soft", "pred_sum_pre_tie",
+                            "tie_flag", "tie_random_add", "consensus_post_tie",
                         ]) + "\n")
                         for idx, (pid, image_id, img_path, caption) in enumerate(dataset_pairs):
                             cap = str(caption).replace("\n", " ").strip()
                             is_real = ""
                             if real_corr is not None:
                                 is_real = int(real_corr[idx])
+                            pa = float(prob_A_vec[idx].item())
+                            pb = float(prob_B_vec[idx].item())
+                            pair_score = 0.5 * (pa + pb)
+                            pas = float(pred_A_soft[idx].item())
+                            pbs = float(pred_B_soft[idx].item())
+                            psum = float(pred_sum_pre_tie[idx].item())
+                            tflag = int(tie_mask[idx].item())
+                            tadd = int(tie_random_add[idx].item())
+                            cpost = float(consensus_division[idx].item())
                             f.write(
                                 f"{idx}\t{pid}\t{image_id}\t{img_path}\t{cap}\t"
-                                f"{int(label_hat[idx].item())}\t{int(pred_A[idx].item())}\t"
-                                f"{int(pred_B[idx].item())}\t{is_real}\n"
+                                f"{int(round(label_hat[idx].item()))}\t"
+                                f"{int(round(pred_A[idx].item()))}\t"
+                                f"{int(round(pred_B[idx].item()))}\t"
+                                f"{pa:.8f}\t{pb:.8f}\t{pair_score:.8f}\t{is_real}\t"
+                                f"{pas:.8f}\t{pbs:.8f}\t{psum:.8f}\t"
+                                f"{tflag}\t{tadd}\t{cpost:.8f}\n"
                             )
                     logger.info(f"GMM pair classification saved to {dump_path}")
             except Exception as exc:
@@ -348,8 +388,9 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
     if get_rank() == 0:
         logger.info(f"best R1: {best_top1} at epoch {arguments['epoch']}")
 
-    arguments["epoch"] = epoch
-    checkpointer.save("last", **arguments)
+    # Disabled on purpose to avoid extra 4.2GB checkpoint writes when disk is tight.
+    # arguments["epoch"] = epoch
+    # checkpointer.save("last", **arguments)
                     
 def do_inference(model, test_img_loader, test_txt_loader):
 
