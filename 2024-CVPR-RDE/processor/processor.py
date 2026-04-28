@@ -105,56 +105,13 @@ class BetaMixture1D(object):
         return 'BetaMixture1D(w={}, a={}, b={})'.format(self.weight, self.alphas, self.betas)
 
 
-def split_prob(prob, threshld, noise_rate=0.0, adaptive=True, robust=True):
-    """
-    Robust threshold selection for GMM classification
-    Focus: Robustness to different noise levels and edge cases
-    
-    Args:
-        prob: Probability scores from GMM
-        threshld: Base threshold (default 0.5)
-        noise_rate: Current noise rate for adaptive threshold
-        adaptive: Whether to use adaptive threshold based on noise rate
-        robust: Whether to use robust prediction (handles edge cases)
-    """
-    if adaptive:
-        # Adaptive threshold based on noise rate - ROBUST to different noise levels
-        # At low noise (0.0-0.3): use higher threshold (0.6-0.5) - be more conservative
-        # At high noise (0.4-0.7): use lower threshold (0.4-0.3) - be more aggressive
-        if noise_rate <= 0.3:
-            # Low noise: be conservative, only mark clear noisy samples
-            adaptive_thresh = 0.6 - 0.1 * (noise_rate / 0.3)  # 0.6 to 0.5
-        elif noise_rate <= 0.5:
-            # Medium noise: moderate threshold
-            adaptive_thresh = 0.5 - 0.1 * ((noise_rate - 0.3) / 0.2)  # 0.5 to 0.4
-        else:
-            # High noise: be aggressive, mark more as noisy
-            adaptive_thresh = 0.4 - 0.1 * ((noise_rate - 0.5) / 0.2)  # 0.4 to 0.3
-        
-        threshld = adaptive_thresh
-    
-    # ROBUST: Handle edge case where all probabilities are above threshold
+def split_prob(prob, threshld):
     if prob.min() > threshld:
         """From https://github.com/XLearning-SCU/2021-NeurIPS-NCR"""
         # If prob are all larger than threshld, i.e. no noisy data, we enforce 1/100 unlabeled data
-        print(f'No estimated noisy data. Enforce the 1/100 data with small probability to be unlabeled.')
+        print('No estimated noisy data. Enforce the 1/100 data with small probability to be unlabeled.')
         threshld = np.sort(prob)[len(prob)//100]
-    
-    # ROBUST: Handle edge case where all probabilities are below threshold
-    if robust and prob.max() < threshld:
-        # If all are below threshold, use percentile-based threshold
-        threshld = np.percentile(prob, 10)  # Mark bottom 10% as noisy
-    
-    # ROBUST: Use confidence-weighted prediction to handle uncertain cases
-    confidence = np.abs(prob - threshld)
-    pred = (prob > threshld).astype(float)
-    
-    # ROBUST: For uncertain cases (close to threshold), use softer prediction
-    if robust:
-        uncertainty_mask = confidence < 0.1  # Within 0.1 of threshold
-        # For uncertain cases, use probability directly instead of hard threshold
-        pred[uncertainty_mask] = prob[uncertainty_mask]  # Soft prediction for uncertain
-    
+    pred = (prob > threshld)
     return (pred+0)
 
 def get_loss(model, data_loader):
@@ -177,8 +134,16 @@ def get_loss(model, data_loader):
             if i % 100 == 0:
                 logger.info(f'compute loss batch {i}')
 
-    losses_A = (lossA-lossA.min())/(lossA.max()-lossA.min())    
-    losses_B = (lossB-lossB.min())/(lossB.max()-lossB.min())
+    denom_a = lossA.max() - lossA.min()
+    denom_b = lossB.max() - lossB.min()
+    if denom_a > 0:
+        losses_A = (lossA - lossA.min()) / denom_a
+    else:
+        losses_A = torch.zeros_like(lossA)
+    if denom_b > 0:
+        losses_B = (lossB - lossB.min()) / denom_b
+    else:
+        losses_B = torch.zeros_like(lossB)
     
     input_loss_A = losses_A.reshape(-1,1) 
     input_loss_B = losses_B.reshape(-1,1)
@@ -202,23 +167,21 @@ def get_loss(model, data_loader):
     prob_B = prob_B[:, gmm_B.means_.argmin()]
  
  
-    # Get noise rate for adaptive threshold
-    noise_rate = getattr(model.args, 'noisy_rate', 0.0) if hasattr(model, 'args') else 0.0
-    
-    # Use robust adaptive threshold based on noise rate
-    pred_A = split_prob(prob_A, 0.5, noise_rate=noise_rate, adaptive=True, robust=True)
-    pred_B = split_prob(prob_B, 0.5, noise_rate=noise_rate, adaptive=True, robust=True)
+    pred_A = split_prob(prob_A, 0.5)
+    pred_B = split_prob(prob_B, 0.5)
 
     # Xác suất GMM (thành phần mean thấp ~ "clean") — dump vào TSV để vẽ phân bố [0,1]
+    # lossA, lossB: loss thô từng mẫu; losses_A/B: min–max về [0,1] (đầu vào GMM)
     return (
         torch.as_tensor(pred_A, dtype=torch.float32),
         torch.as_tensor(pred_B, dtype=torch.float32),
         torch.as_tensor(prob_A, dtype=torch.float32),
         torch.as_tensor(prob_B, dtype=torch.float32),
+        lossA.float(),
+        lossB.float(),
+        losses_A.float(),
+        losses_B.float(),
     )
-
-
-
 
 def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
              scheduler, checkpointer):
@@ -259,7 +222,16 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         # data_size = train_loader.dataset.__len__()
         # pred_A, pred_B  =  torch.ones(data_size), torch.ones(data_size)
     
-        pred_A, pred_B, prob_A_vec, prob_B_vec = get_loss(model, train_loader)
+        (
+            pred_A,
+            pred_B,
+            prob_A_vec,
+            prob_B_vec,
+            loss_A_vec,
+            loss_B_vec,
+            loss_A_norm_vec,
+            loss_B_norm_vec,
+        ) = get_loss(model, train_loader)
     
         pred_A_soft = pred_A.clone()
         pred_B_soft = pred_B.clone()
@@ -296,7 +268,9 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                         f.write("\t".join([
                             "index", "pid", "image_id", "image_path",
                             "caption", "gmm_clean", "pred_A", "pred_B",
-                            "prob_A", "prob_B", "pair_score", "is_real",
+                            "prob_A", "prob_B",
+                            "loss_A", "loss_B", "loss_A_norm", "loss_B_norm",
+                            "pair_score", "is_real",
                             "pred_A_soft", "pred_B_soft", "pred_sum_pre_tie",
                             "tie_flag", "tie_random_add", "consensus_post_tie",
                         ]) + "\n")
@@ -307,6 +281,10 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                                 is_real = int(real_corr[idx])
                             pa = float(prob_A_vec[idx].item())
                             pb = float(prob_B_vec[idx].item())
+                            la = float(loss_A_vec[idx].item())
+                            lb = float(loss_B_vec[idx].item())
+                            lan = float(loss_A_norm_vec[idx].item())
+                            lbn = float(loss_B_norm_vec[idx].item())
                             pair_score = 0.5 * (pa + pb)
                             pas = float(pred_A_soft[idx].item())
                             pbs = float(pred_B_soft[idx].item())
@@ -319,7 +297,8 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                                 f"{int(round(label_hat[idx].item()))}\t"
                                 f"{int(round(pred_A[idx].item()))}\t"
                                 f"{int(round(pred_B[idx].item()))}\t"
-                                f"{pa:.8f}\t{pb:.8f}\t{pair_score:.8f}\t{is_real}\t"
+                                f"{pa:.8f}\t{pb:.8f}\t{la:.8f}\t{lb:.8f}\t{lan:.8f}\t{lbn:.8f}\t"
+                                f"{pair_score:.8f}\t{is_real}\t"
                                 f"{pas:.8f}\t{pbs:.8f}\t{psum:.8f}\t"
                                 f"{tflag}\t{tadd}\t{cpost:.8f}\n"
                             )
