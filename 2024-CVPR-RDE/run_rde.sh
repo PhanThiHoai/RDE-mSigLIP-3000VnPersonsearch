@@ -1,7 +1,7 @@
 
 root_dir=/mnt/nvme0/home/hoaixg/RDE-mSiglip/2024-CVPR-RDE
 tau=0.015 
-margin=0.3
+margin=0.1
 noisy_rate=0.0  #0.0 0.2 0.5 0.8
 select_ratio=0.3
 loss=TAL
